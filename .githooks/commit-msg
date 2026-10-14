@@ -1,0 +1,19 @@
+#!/bin/sh
+# Validate the commit message against Conventional Commits (commitlint.config.mjs).
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+. ./.githooks/lib.sh
+ensure_node
+ensure_deps
+
+if ! npx --no -- commitlint --edit "$1"; then
+	cat >&2 <<'MSG'
+
+Commit message rejected: use Conventional Commits, e.g.
+  feat: add send-message node
+  fix(trigger): re-register webhook after URL change
+  docs: clarify WEBHOOK_URL
+See "Contributing" in README.md.
+MSG
+	exit 1
+fi

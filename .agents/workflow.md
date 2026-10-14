@@ -88,7 +88,11 @@ commands. Short overview of the commands:
   or `n8n-node cloud-support disable` to allow custom ESLint config (disables
   cloud eligibility)
 - `n8n-node release` - publish your community node package to npm.
-  This command handles the complete release process using `release-it`:
+  **Not used in this repository:** releases are automated by release-please
+  (`.github/workflows/release-please.yml`) and shipped as GitHub Release tarballs
+  only; nothing is published to npm, and there is no `release` script. Write
+  Conventional Commit messages and never bump versions or push tags by hand.
+  For reference, the upstream command handles the release process using `release-it`:
   - Builds the node
   - Runs linting checks
   - Updates changelog

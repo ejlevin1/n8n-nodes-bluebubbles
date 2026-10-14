@@ -1,0 +1,81 @@
+# Automated semver releases driven by Conventional Commits.
+#
+# On every push to main, release-please opens/updates a "chore(main): release X.Y.Z"
+# PR that bumps package.json, .release-please-manifest.json and CHANGELOG.md.
+# Merging that PR makes this same workflow create the vX.Y.Z tag + GitHub Release,
+# then build and attach n8n-nodes-bluebubbles-X.Y.Z.tgz to it.
+#
+# The build/upload must live in this workflow: tags and releases created with
+# GITHUB_TOKEN do not trigger other workflows (e.g. an `on: push: tags`).
+#
+# Install in n8n with:
+#   npm i --omit=peer https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases/download/vX.Y.Z/n8n-nodes-bluebubbles-X.Y.Z.tgz
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Never run two release jobs at once; let a queued run finish rather than cancel.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Everything below runs only when merging the release PR created a release.
+      - uses: actions/checkout@v7
+        if: ${{ steps.release.outputs.release_created }}
+
+      - name: Set up Node.js
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: ${{ steps.release.outputs.release_created }}
+        run: 'npm ci'
+
+      - name: Run lint
+        if: ${{ steps.release.outputs.release_created }}
+        run: 'npm run lint'
+
+      - name: Verify package.json version matches the release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "package.json version ${PKG_VERSION} does not match release ${RELEASE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build and pack
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          npm run build
+          npm pack
+
+      - name: Upload tarball to the GitHub Release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: gh release upload "$TAG_NAME" ./*.tgz --clobber
