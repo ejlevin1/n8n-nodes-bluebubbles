@@ -1,0 +1,38 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Packed tarballs (npm pack) — published via GitHub Releases, never committed
+*.tgz
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.npmrc
+
+# Local n8n data from `n8n-node dev` / testing
+.n8n/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/launch.json
+
+# Test / tooling caches and temp files
+coverage/
+.nyc_output/
+test-results/
+.cache/
+*.tmp
+*.bak
+*.orig

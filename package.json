@@ -1,0 +1,57 @@
+{
+	"name": "n8n-nodes-bluebubbles",
+	"version": "0.1.0",
+	"description": "n8n community nodes for BlueBubbles (self-hosted iMessage server): credential + auto-subscribing webhook trigger",
+	"license": "MIT",
+	"homepage": "https://github.com/ejlevin1/n8n-nodes-bluebubbles",
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"bluebubbles",
+		"imessage"
+	],
+	"author": {
+		"name": "Eric LeVin",
+		"email": "eric@ericlevin.me"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/ejlevin1/n8n-nodes-bluebubbles.git"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"build": "n8n-node build",
+		"build:watch": "tsc --watch",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"release": "n8n-node release",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist",
+		"!dist/tsconfig.tsbuildinfo"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/BlueBubblesApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/BlueBubbles/BlueBubblesTrigger.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "0.52.3",
+		"eslint": "9.39.5",
+		"prettier": "3.9.10",
+		"release-it": "21.1.1",
+		"typescript": "5.9.3"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}

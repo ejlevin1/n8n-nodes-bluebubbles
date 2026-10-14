@@ -1,0 +1,49 @@
+# Builds the package and attaches the npm tarball to a GitHub Release on every
+# version tag push. Install in n8n with:
+#   npm i --omit=peer https://github.com/<owner>/n8n-nodes-bluebubbles/releases/download/<tag>/n8n-nodes-bluebubbles-<version>.tgz
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: 'npm ci'
+
+      - name: Run lint
+        run: 'npm run lint'
+
+      - name: Verify tag matches package version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build and pack
+        run: |
+          npm run build
+          npm pack
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" ./*.tgz --title "${GITHUB_REF_NAME}" --generate-notes
