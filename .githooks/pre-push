@@ -1,0 +1,9 @@
+#!/bin/sh
+# Make sure the package still builds before pushing (same check CI runs).
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+. ./.githooks/lib.sh
+ensure_node
+ensure_deps
+
+npm run --silent build

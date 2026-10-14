@@ -27,8 +27,9 @@
 		"dev": "n8n-node dev",
 		"lint": "n8n-node lint",
 		"lint:fix": "n8n-node lint --fix",
-		"release": "n8n-node release",
-		"prepublishOnly": "n8n-node prerelease"
+		"hooks:install": "git config core.hooksPath .githooks",
+		"dependencies": "git config core.hooksPath .githooks || echo Skipping git hooks install: not a git checkout",
+		"prepublishOnly": "node -e \"console.error('n8n-nodes-bluebubbles is distributed via GitHub Releases only (release-please). Do not npm publish.');process.exit(1)\""
 	},
 	"files": [
 		"dist",
@@ -45,10 +46,11 @@
 		]
 	},
 	"devDependencies": {
+		"@commitlint/cli": "21.2.3",
+		"@commitlint/config-conventional": "21.2.3",
 		"@n8n/node-cli": "0.52.3",
 		"eslint": "9.39.5",
 		"prettier": "3.9.10",
-		"release-it": "21.1.1",
 		"typescript": "5.9.3"
 	},
 	"peerDependencies": {

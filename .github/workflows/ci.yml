@@ -11,15 +11,18 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
@@ -32,3 +35,30 @@ jobs:
 
       - name: Run build
         run: 'npm run build'
+
+  # Every commit in a PR must follow Conventional Commits (commitlint.config.mjs),
+  # so rebase-merges also feed release-please correctly. The PR title (used for
+  # squash merges) is validated separately in pr-title.yml.
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: 'npm ci'
+
+      - name: Validate PR commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx --no -- commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
