@@ -8,6 +8,7 @@ n8n community nodes for [BlueBubbles](https://bluebubbles.app/), the self-hosted
 - [Credential setup](#credential-setup)
 - [BlueBubbles Trigger](#bluebubbles-trigger)
 - [Networking](#networking)
+- [Install from npm (recommended once published)](#install-from-npm-recommended-once-published)
 - [Installing in self-hosted n8n (Docker)](#installing-in-self-hosted-n8n-docker)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -92,9 +93,24 @@ volumes:
   n8n_data:
 ```
 
+## Install from npm (recommended once published)
+
+The package is published to npm as [`n8n-nodes-bluebubbles`](https://www.npmjs.com/package/n8n-nodes-bluebubbles), with npm provenance linking each version to the GitHub Actions run that built it.
+
+**n8n UI:** go to **Settings > Community Nodes > Install**, enter `n8n-nodes-bluebubbles`, accept the risk prompt, and install.
+
+**Manual (e.g. Docker, or when the UI install is disabled):**
+
+```sh
+docker exec -it n8n sh -c "mkdir -p ~/.n8n/nodes && cd ~/.n8n/nodes && npm i --omit=peer n8n-nodes-bluebubbles"
+docker restart n8n
+```
+
+The `--omit=peer` and persistent-volume notes in the next section apply here too. To update, use **Update** in the Community Nodes settings, or re-run the command with `n8n-nodes-bluebubbles@latest` and restart.
+
 ## Installing in self-hosted n8n (Docker)
 
-Install the release tarball straight from GitHub. Every [release](https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases) attaches `n8n-nodes-bluebubbles-<version>.tgz` at:
+Install the release tarball straight from GitHub. This works without npm, and every GitHub Release tarball is byte-identical to the npm package of the same version. Every [release](https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases) attaches `n8n-nodes-bluebubbles-<version>.tgz` at:
 
 ```text
 https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases/download/v<version>/n8n-nodes-bluebubbles-<version>.tgz
@@ -189,13 +205,40 @@ CI enforces this: the **PR Title** workflow lints the PR title, and the `commitl
 
 ### Releases
 
-Releases are fully automated by [release-please](https://github.com/googleapis/release-please) ([`.github/workflows/release-please.yml`](.github/workflows/release-please.yml)). Nothing is published to npm.
+Releases are fully automated by [release-please](https://github.com/googleapis/release-please) ([`.github/workflows/release-please.yml`](.github/workflows/release-please.yml)).
 
 1. Merge conventional commits into `main`.
 2. release-please opens or updates a release PR titled `chore(main): release X.Y.Z`. It bumps `package.json`, `.release-please-manifest.json`, `CHANGELOG.md` and the `VERSION` in this README.
-3. Merge the release PR when you want to ship. The same workflow then creates the `vX.Y.Z` tag and GitHub Release, builds the package, and uploads `n8n-nodes-bluebubbles-X.Y.Z.tgz` to that release.
+3. Merge the release PR when you want to ship. The same workflow then creates the `vX.Y.Z` tag and GitHub Release, builds the package, uploads `n8n-nodes-bluebubbles-X.Y.Z.tgz` to that release, and (when the `NPM_PUBLISH` repository variable is `true`) publishes that same tarball to npm.
 
 Do not bump versions, edit `CHANGELOG.md` release entries, or push `v*` tags by hand. To force a specific version, add a `Release-As: X.Y.Z` footer to a commit on `main`.
+
+Do not run `npm publish` from the working tree: the `prepublishOnly` script refuses it. Publishing a tarball (`npm publish ./<file>.tgz`) skips lifecycle scripts, which is how both CI and the one-time manual publish below work.
+
+### npm publishing (maintainers)
+
+CI publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (GitHub Actions OIDC), so there is no `NPM_TOKEN` secret. Provenance is generated automatically because the repository and package are public. The publish step is skipped unless the repository variable `NPM_PUBLISH` is `true`.
+
+One-time setup, in order:
+
+1. **First publish by hand.** The package must exist on npm before a trusted publisher can be attached. Publish the tarball from the first GitHub Release:
+
+   ```sh
+   gh release download v0.1.0 --repo ejlevin1/n8n-nodes-bluebubbles --pattern '*.tgz'
+   npm login
+   npm publish ./n8n-nodes-bluebubbles-0.1.0.tgz --access public
+   ```
+
+2. **Add the trusted publisher.** On npmjs.com, open the package's **Settings > Trusted publishing**, choose **GitHub Actions**, and enter:
+   - Organization or user: `ejlevin1`
+   - Repository: `n8n-nodes-bluebubbles`
+   - Workflow filename: `release-please.yml` (filename only; the publish must run in this file, not in a reusable workflow it calls)
+   - Environment: leave empty
+   - Allow `npm publish`.
+3. **Turn on CI publishing.** In GitHub, **Settings > Secrets and variables > Actions > Variables**, add the repository variable `NPM_PUBLISH` with value `true`.
+4. **Lock down tokens.** After the first CI publish succeeds, set the package's **Settings > Publishing access** to **Require two-factor authentication and disallow tokens**. Trusted publishing keeps working; classic and granular tokens can no longer publish.
+
+The trusted publisher configuration must complete a publish within 2 days of being created, so do step 2 shortly before the next release PR is merged (or re-create it if that window passes). `package.json` `repository.url` must stay `git+https://github.com/ejlevin1/n8n-nodes-bluebubbles.git`, or npm rejects the provenance/OIDC publish.
 
 ## Compatibility
 

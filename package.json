@@ -16,7 +16,7 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/ejlevin1/n8n-nodes-bluebubbles.git"
+		"url": "git+https://github.com/ejlevin1/n8n-nodes-bluebubbles.git"
 	},
 	"engines": {
 		"node": ">=22"
@@ -29,7 +29,11 @@
 		"lint:fix": "n8n-node lint --fix",
 		"hooks:install": "git config core.hooksPath .githooks",
 		"dependencies": "git config core.hooksPath .githooks || echo Skipping git hooks install: not a git checkout",
-		"prepublishOnly": "node -e \"console.error('n8n-nodes-bluebubbles is distributed via GitHub Releases only (release-please). Do not npm publish.');process.exit(1)\""
+		"prepublishOnly": "node -e \"console.error('Refusing to npm publish from the working tree. Releases are published by CI (release-please) from the packed tarball; for a manual publish run: npm pack, then npm publish ./n8n-nodes-bluebubbles-X.Y.Z.tgz --access public');process.exit(1)\""
+	},
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org/"
 	},
 	"files": [
 		"dist",
