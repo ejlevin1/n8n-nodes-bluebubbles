@@ -65,6 +65,13 @@ const server = http.createServer((req, res) => {
 			return send(401, err(401, 'You are not authorized', 'Unauthorized'));
 
 		const p = url.pathname.replace(/^\/api\/v1/, '');
+		if (p === '/slow') {
+			// Answers far later than any test timeout; the client aborts first.
+			const timer = setTimeout(() => send(200, { status: 200, data: 'late' }), 5000);
+			res.on('close', () => clearTimeout(timer));
+			return;
+		}
+		if (p === '/server-error') return send(500, err(500, 'Server error', 'Transaction timeout'));
 		if (p === '/server/info') return send(200, { status: 200, message: 'ok', data: bb.serverInfo });
 		if (p === '/ok')
 			return send(200, { status: 200, message: 'Success', data: { hello: 'world' } });
@@ -135,10 +142,14 @@ async function sendRequest(opts, credentials) {
 		init.headers['content-type'] = 'application/json';
 	}
 
+	// Like axios: a `timeout` aborts the request with code ECONNABORTED.
+	if (opts.timeout) init.signal = AbortSignal.timeout(opts.timeout);
 	let res;
 	try {
 		res = await fetch(url, init);
 	} catch (e) {
+		if (e.name === 'TimeoutError')
+			throw new AxiosError(`timeout of ${opts.timeout}ms exceeded`, 'ECONNABORTED', config);
 		throw new AxiosError(e.message, e.cause?.code ?? 'ECONNREFUSED', config);
 	}
 	const buffer = Buffer.from(await res.arrayBuffer());
@@ -289,7 +300,8 @@ test('HTTP 200 with envelope status >= 400 throws a redacted NodeApiError', asyn
 	assert.ok(!errorText(error).includes(PASSWORD), 'password leaked');
 });
 
-test('timeout is passed through to the HTTP helper', async () => {
+test('timeout is passed through to the HTTP helper; JSON calls default to 150 s', async () => {
+	assert.equal(G.DEFAULT_REQUEST_TIMEOUT_MS, 150_000);
 	const ctx = makeContext(base);
 	await G.blueBubblesApiCall.call(ctx, {
 		method: 'GET',
@@ -299,7 +311,67 @@ test('timeout is passed through to the HTTP helper', async () => {
 	});
 	assert.equal(ctx.calls[0].timeout, 8000);
 	await G.blueBubblesApiCall.call(ctx, { method: 'GET', endpoint: '/ok', operation: 'x' });
-	assert.equal('timeout' in ctx.calls[1], false);
+	assert.equal(ctx.calls[1].timeout, G.DEFAULT_REQUEST_TIMEOUT_MS);
+	await G.blueBubblesApiRequest.call(ctx, { method: 'GET', endpoint: '/ok', operation: 'x' });
+	assert.equal(ctx.calls[2].timeout, G.DEFAULT_REQUEST_TIMEOUT_MS);
+});
+
+test('attachment download and multipart upload default to the longer 10 min timeout', async () => {
+	assert.equal(G.ATTACHMENT_REQUEST_TIMEOUT_MS, 600_000);
+	const ctx = makeContext(base);
+	await G.blueBubblesBinaryRequest.call(ctx, {
+		method: 'GET',
+		endpoint: '/attachment/abc/download',
+		operation: 'dl',
+	});
+	await G.blueBubblesFormRequest.call(ctx, {
+		method: 'POST',
+		endpoint: '/message/attachment',
+		fields: { chatGuid: 'any;-;+1' },
+		files: [{ fieldName: 'attachment', buffer: Buffer.from('x'), fileName: 'x.txt' }],
+		operation: 'up',
+	});
+	await G.blueBubblesBinaryRequest.call(ctx, {
+		method: 'GET',
+		endpoint: '/attachment/abc/download',
+		operation: 'dl',
+		timeout: 1234,
+	});
+	assert.deepEqual(
+		ctx.calls.map((c) => c.timeout),
+		[G.ATTACHMENT_REQUEST_TIMEOUT_MS, G.ATTACHMENT_REQUEST_TIMEOUT_MS, 1234],
+	);
+});
+
+test('a timed-out request gives the friendly, redacted timeout error', async () => {
+	const ctx = makeContext(base);
+	const started = Date.now();
+	const error = await rejects(
+		G.blueBubblesApiCall.call(ctx, {
+			method: 'POST',
+			endpoint: '/slow',
+			operation: 'Could not search BlueBubbles messages',
+			timeout: 100,
+		}),
+	);
+	assert.ok(Date.now() - started < 3000, 'the timeout did not stop the wait');
+	assert.ok(error instanceof NodeApiError);
+	assert.equal(error.message, 'Could not search BlueBubbles messages (request timed out)');
+	assert.match(error.description, /Network error: ECONNABORTED\./);
+	assert.match(error.description, /Hint: n8n could not reach http:\/\/127\.0\.0\.1:\d+\./);
+	assert.ok(!errorText(error).includes(PASSWORD), 'password leaked');
+	assert.equal(G.isTimeoutError(error), true);
+});
+
+test('isTimeoutError is false for HTTP errors and foreign errors', async () => {
+	const ctx = makeContext(base);
+	const error = await rejects(
+		G.blueBubblesApiCall.call(ctx, { method: 'GET', endpoint: '/server-error', operation: 'x' }),
+	);
+	assert.equal(error.httpCode, '500');
+	assert.equal(G.isTimeoutError(error), false);
+	assert.equal(G.isTimeoutError(new Error('x (request timed out)')), false);
+	assert.equal(G.isTimeoutError(undefined), false);
 });
 
 test('hints override the default hint for a status (CHAT_404_HINT)', async () => {

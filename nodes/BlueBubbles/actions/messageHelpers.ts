@@ -188,6 +188,15 @@ export function escapeLike(term: string): string {
 }
 
 /**
+ * How Search looks for text:
+ * - `spotlight`: one `message.text` clause, which BlueBubbles Server reroutes to
+ *   Spotlight via the Private API helper on macOS 13+ (plain SQL otherwise).
+ * - `database`: plain SQL `LIKE` on `message.text`, never rerouted.
+ * - `auto`: Spotlight with a bounded timeout, then the database on a timeout or 5xx.
+ */
+export type SearchMethod = 'auto' | 'spotlight' | 'database';
+
+/**
  * The text clause. The statement is concatenated into SQL verbatim, so the term
  * only ever goes into `args`. The bind name must stay the 3rd space-separated
  * token: on macOS 13+ with the Private API the server reroutes `message.text`
@@ -198,6 +207,29 @@ export function likeClause(query: string): WhereClause {
 		statement: "message.text LIKE :query ESCAPE '\\'",
 		args: { query: `%${escapeLike(query)}%` },
 	};
+}
+
+/**
+ * Clause that only matches rows with a `message.text` value. Redundant next to
+ * {@link likeClause} (`NULL LIKE ...` is never true) but it is what keeps the
+ * search in SQLite: BlueBubbles Server only reroutes to Spotlight when exactly
+ * ONE `where` statement contains `message.text`; with two it runs the query
+ * against the database unchanged.
+ */
+export const TEXT_NOT_NULL_CLAUSE: Readonly<WhereClause> = {
+	statement: 'message.text IS NOT NULL',
+	args: {},
+};
+
+/**
+ * The text clauses for a search method. `spotlight` (and `auto`'s first try) is
+ * the single {@link likeClause} the server reroutes; `database` adds
+ * {@link TEXT_NOT_NULL_CLAUSE} so the server keeps the plain SQL `LIKE`.
+ */
+export function textClauses(query: string, method: Exclude<SearchMethod, 'auto'>): WhereClause[] {
+	if (!query) return [];
+	if (method === 'spotlight') return [likeClause(query)];
+	return [likeClause(query), { ...TEXT_NOT_NULL_CLAUSE, args: {} }];
 }
 
 /** Whether a From Address value means "messages I sent". */
