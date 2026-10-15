@@ -232,7 +232,7 @@ https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases/download/v<version>/n
 `VERSION` below is kept at the latest release automatically:
 
 ```sh
-VERSION=0.1.2 # x-release-please-version
+VERSION=0.2.0 # x-release-please-version
 docker exec -it n8n sh -c "mkdir -p ~/.n8n/nodes && cd ~/.n8n/nodes && npm i --omit=peer https://github.com/ejlevin1/n8n-nodes-bluebubbles/releases/download/v${VERSION}/n8n-nodes-bluebubbles-${VERSION}.tgz"
 docker restart n8n
 ```
