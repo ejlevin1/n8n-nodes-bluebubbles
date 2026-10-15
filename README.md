@@ -1,11 +1,12 @@
 # n8n-nodes-bluebubbles
 
-n8n community nodes for [BlueBubbles](https://bluebubbles.app/), the self-hosted server that exposes macOS iMessage over HTTP. Use it to start n8n workflows from incoming iMessages and other BlueBubbles server events.
+n8n community nodes for [BlueBubbles](https://bluebubbles.app/), the self-hosted server that exposes macOS iMessage over HTTP. Use it to send and manage iMessages (messages, chats, attachments, contacts, scheduled messages) from n8n workflows, and to start workflows from incoming iMessages and other BlueBubbles server events.
 
 [n8n](https://n8n.io/) is a [fair-code licensed](https://docs.n8n.io/sustainable-use-license/) workflow automation platform.
 
 - [Included nodes](#included-nodes)
 - [Credential setup](#credential-setup)
+- [BlueBubbles node](#bluebubbles-node)
 - [BlueBubbles Trigger](#bluebubbles-trigger)
 - [Networking](#networking)
 - [Install from npm (recommended once published)](#install-from-npm-recommended-once-published)
@@ -20,6 +21,7 @@ n8n community nodes for [BlueBubbles](https://bluebubbles.app/), the self-hosted
 | Name | Type | Purpose |
 | --- | --- | --- |
 | BlueBubbles API | Credential | Server URL and password for a BlueBubbles server |
+| BlueBubbles | Action node | Sends messages and manages chats, attachments, contacts, handles, scheduled messages and the server |
 | BlueBubbles Trigger | Trigger node | Starts a workflow when BlueBubbles sends a webhook event |
 
 ## Credential setup
@@ -32,6 +34,112 @@ Create a **BlueBubbles API** credential with:
 | Password | The BlueBubbles server password (as set in the BlueBubbles server app). |
 
 The credential test calls `GET /api/v1/ping`.
+
+## BlueBubbles node
+
+The **BlueBubbles** action node calls the BlueBubbles REST API (`/api/v1`) with the **BlueBubbles API** credential. It can be used as an AI agent tool.
+
+### Resources and operations
+
+Operations marked **PA** need the [Private API](#private-api).
+
+| Resource | Operation | API call | Notes |
+| --- | --- | --- | --- |
+| Message | Send | `POST /message/text` | Send text to an existing chat. Options: Send Method, Subject (PA), Effect ID (PA), Reply to Message GUID (PA). |
+| Message | Send to Address | `POST /message/text`, or `POST /chat/new` for SMS | Send to a phone number or email. Service: iMessage or SMS (SMS needs PA). |
+| Message | Get | `GET /message/:guid` | Includes chats and attachments. |
+| Message | Get Many | `GET /chat/:guid/message` | Messages in one chat. Filters: Created After/Before, From Address, Sort. |
+| Message | Search | `POST /message/query` | Case-insensitive text search, optionally in one chat. Filters: Created After/Before, From Address. |
+| Message | React (PA) | `POST /message/react` | Add or remove a tapback (love, like, dislike, laugh, emphasize, question). |
+| Message | Edit (PA) | `POST /message/:guid/edit` | Edit a message you sent. |
+| Message | Unsend (PA) | `POST /message/:guid/unsend` | Retract a message you sent. |
+| Chat | Get | `GET /chat/:guid` | With participants and last message. |
+| Chat | Get Many | `POST /chat/query` | Most recent first. Options: Unread Only, Include Recent Messages. |
+| Chat | Create (PA) | `POST /chat/new` | Start a chat with one or more addresses and a first message. |
+| Chat | Mark as Read / Mark as Unread (PA) | `POST /chat/:guid/read`, `/unread` | Mark as Unread needs macOS 13+. |
+| Chat | Start Typing / Stop Typing (PA) | `POST` / `DELETE /chat/:guid/typing` | |
+| Chat | Rename Group (PA) | `PUT /chat/:guid` | |
+| Chat | Add Participant / Remove Participant (PA) | `POST /chat/:guid/participant/add`, `/remove` | |
+| Chat | Leave (PA) | `POST /chat/:guid/leave` | |
+| Chat | Delete (PA) | `DELETE /chat/:guid` | |
+| Attachment | Get | `GET /attachment/:guid` | Metadata only. |
+| Attachment | Download | `GET /attachment/:guid/download?original=true` | Writes the file to a binary field (default `data`). |
+| Attachment | Send | `POST /message/attachment` (multipart) | Sends a file from a binary field. |
+| Contact | Get Many | `GET /contact` | Optional case-insensitive search on name, phone numbers and emails. |
+| Contact | Lookup by Address | `POST /contact/query` | Addresses without a matching contact are left out. |
+| Handle | Check iMessage Availability (PA) | `GET /handle/availability/imessage` | Returns `{ available }`. |
+| Handle | Check FaceTime Availability (PA) | `GET /handle/availability/facetime` | Returns `{ available }`. |
+| Scheduled Message | Create | `POST /message/schedule` | Sends once at the given time. |
+| Scheduled Message | Get Many | `GET /message/schedule` | Each record has a `status`: `pending`, `in-progress`, `complete` or `error` (reason in `error`). |
+| Scheduled Message | Delete | `DELETE /message/schedule/:id` | |
+| Server | Ping | `GET /ping` | |
+| Server | Get Info | `GET /server/info` | Server and macOS versions, Private API status. |
+| Server | Get My Addresses | `GET /server/info`, then `GET /icloud/account` | Phone numbers and emails of the signed-in Apple account, primary first. The iCloud lookup is only tried with the Private API, and is best-effort. |
+
+### Choosing a chat
+
+Operations that target a chat use a **Chat** picker with three modes:
+
+- **From List:** searchable list of recent chats, shown by display name or participants.
+- **By GUID:** a chat GUID such as `iMessage;+;chat123456`. A leading `iMessage;-;` is rewritten to `any;-;` so the server picks the service.
+- **By Address:** a phone number or email; targets the one-to-one chat `any;-;<address>`.
+
+### Private API
+
+Operations marked **PA** (and the Subject, Effect ID and Reply options) use the BlueBubbles Private API. It requires:
+
+- Private API enabled in BlueBubbles Server.
+- System Integrity Protection (SIP) disabled on the Mac.
+- The BlueBubbles Private API helper connected (check with **Server > Get Info**: `private_api` and `helper_connected`).
+
+The node does not hide these operations when the Private API is off. The server rejects the request, and the error hint says to enable the Private API (SIP off, helper connected).
+
+### Send method
+
+Text, attachment, chat-create and scheduled sends have a **Send Method** option: **Auto** (default), **Private API** or **AppleScript**.
+
+- **Auto** calls `GET /server/info` once per execution (cached for all items in that run) and uses the Private API only when `private_api` is on **and** the helper is connected; otherwise AppleScript.
+- **Reply to Message GUID** needs the Private API; the item fails if the method resolves to AppleScript.
+- **Send to Address** with **Service: SMS** always needs the Private API and fails otherwise. It creates the chat with `POST /chat/new`, so its output is a **chat** object (chat `guid`), not a message: there is no message GUID and `text` is `null`.
+- **Send to Address** with **Service: iMessage** sends to the chat `any;-;<address>` and lets the server choose the service.
+
+### Scheduled messages
+
+The send method of a scheduled message is resolved and **frozen when it is scheduled**. A message scheduled with the Private API fails when it fires if the helper is disconnected at that time, with no fallback to AppleScript and no retry. Scheduling is not delivery: check **Scheduled Message > Get Many** for records with status `error` afterwards.
+
+### Simplify
+
+**Message > Get / Get Many / Search** and **Chat > Get Many** (for Include Recent Messages) have a **Simplify** toggle, on by default. Simplified messages keep only:
+
+`guid`, `text`, `handle` (`address`, `service`), `isFromMe`, `dateCreated`, `attachments`, `replyToGuid`, `associatedMessageGuid`, `associatedMessageType`, `dateEdited`, `dateRetracted`, `isAudioMessage`, `error`, `chats` (`guid`, `displayName`, `isArchived`).
+
+Turn it off to get the raw BlueBubbles objects.
+
+### Lists and pagination
+
+Get Many and Search operations have **Return All** and **Limit** (default 50). Message Get Many, Message Search and Chat Get Many page through results with `limit`/`offset`, at most 1,000 rows per request (the server rejects larger pages). Contact Get Many and Scheduled Message Get Many fetch the full list in one request and apply the limit in n8n.
+
+- **Message > Get Many**, **From Address** filter: applied after each page is fetched, so fewer results than the limit may come back. Use `me` for messages you sent.
+- **Message > Search**, **From Address**: matches the *other* party of the conversation; use `me` for your own messages. Searching a chat that does not exist returns no results rather than an error. Messages whose text is stored only in rich-text form may not be found.
+- **Chat > Get Many**, **Unread Only**: the limit applies after filtering, and "unread" is the read state of the Mac's user.
+
+### Visible and destructive actions
+
+These change what other people see. Use them deliberately, especially from an AI agent:
+
+- **Visible to others:** Message React, Edit and Unsend; Chat Mark as Read (read receipt), Start/Stop Typing, Rename Group, Add/Remove Participant.
+- **Destructive, cannot be undone:** Chat Delete (removes the chat and all its messages from the Mac), Chat Leave (another member has to add you back), Chat Remove Participant, Message Unsend, Scheduled Message Delete.
+
+### Unverified
+
+These are implemented from the BlueBubbles API reference but not yet confirmed against a live server. Test them before relying on them:
+
+- The **Subject** and **Effect ID** send options.
+- The request shape of **Chat > Create** (`POST /chat/new` with `addresses`, `message`, `method`, `service`, `tempGuid`).
+
+### Errors
+
+Errors name the request, HTTP status and BlueBubbles error message with a hint (for example "Chat does not exist; check the chat GUID" on a 404). The password is never included. With **On Error > Continue**, a failing item becomes `{ "error": "<message>" }`, paired with its input item, and the rest of the items still run.
 
 ## BlueBubbles Trigger
 
