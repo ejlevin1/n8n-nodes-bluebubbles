@@ -36,6 +36,10 @@ jobs:
       - name: Run build
         run: 'npm run build'
 
+      # Mock BlueBubbles server tests against the compiled dist (node --test, no extra deps).
+      - name: Run tests
+        run: 'npm test'
+
   # Every commit in a PR must follow Conventional Commits (commitlint.config.mjs),
   # so rebase-merges also feed release-please correctly. The PR title (used for
   # squash merges) is validated separately in pr-title.yml.
