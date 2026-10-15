@@ -43,6 +43,10 @@ const bb = {
 		this.chatMessageCount = 30;
 		this.searchCount = 30;
 		this.lookupFails = false;
+		// Status the mock answers for a Spotlight-shaped search (0 = success).
+		this.spotlightStatus = 0;
+		// When set, the fake HTTP helper times out Spotlight-shaped searches.
+		this.spotlightTimesOut = false;
 		this.envelopeError = false;
 		this.schedules = [
 			{ id: 1, status: 'pending' },
@@ -71,6 +75,16 @@ function fakeMessage(n, extra = {}) {
 		originalROWID: n,
 		...extra,
 	};
+}
+
+/**
+ * Mirrors BlueBubbles Server's reroute rule (messageRouter.query): with the
+ * Private API on macOS 13+, a search is sent to Spotlight only when exactly one
+ * `where` statement contains `message.text`.
+ */
+function isSpotlightShaped(body) {
+	const where = Array.isArray(body?.where) ? body.where : [];
+	return where.filter((w) => w.statement.includes('message.text')).length === 1;
 }
 
 function range(offset, limit, total) {
@@ -146,6 +160,11 @@ const server = http.createServer((req, res) => {
 					);
 				return send(200, ok(rows));
 			}
+			if (bb.spotlightStatus && isSpotlightShaped(body))
+				return send(
+					bb.spotlightStatus,
+					err(bb.spotlightStatus, 'An unhandled error has occurred!', 'Transaction timeout'),
+				);
 			return send(200, ok(range(body.offset, body.limit, bb.searchCount)));
 		}
 		if (m === 'POST' && p === '/message/react') return send(200, ok({ guid: 'reaction-1' }));
@@ -207,6 +226,16 @@ async function sendRequest(opts, credentials) {
 	for (const [key, value] of Object.entries({ ...opts.qs, ...authQs }))
 		url.searchParams.set(key, String(value));
 	const config = { url: url.toString(), method: opts.method, params: { ...opts.qs, ...authQs } };
+
+	if (bb.spotlightTimesOut && opts.url.endsWith('/message/query') && isSpotlightShaped(opts.body)) {
+		bb.requests.push({
+			method: opts.method,
+			path: '/message/query',
+			body: opts.body,
+			timedOut: true,
+		});
+		throw new AxiosError(`timeout of ${opts.timeout}ms exceeded`, 'ECONNABORTED', config);
+	}
 
 	const init = { method: opts.method, headers: { ...(opts.headers ?? {}) } };
 	if (opts.body instanceof FormData) {
@@ -316,6 +345,12 @@ async function rejects(promise) {
 const run = (mod, operation, params, item) => {
 	const ctx = makeContext(params, item);
 	return mod.execute.call(ctx, 0, operation, G.createExecutionCache());
+};
+/** Like `run`, but also returns the HTTP helper calls (with their timeouts). */
+const runWithCalls = async (mod, operation, params) => {
+	const ctx = makeContext(params);
+	const out = await mod.execute.call(ctx, 0, operation, G.createExecutionCache());
+	return { out, calls: ctx.calls };
 };
 const nonInfo = () => bb.requests.filter((r) => r.path !== '/server/info');
 const chat = (value, mode = 'guid') => ({ __rl: true, mode, value });
@@ -704,6 +739,187 @@ test('message.search: a failed chat lookup adds a note instead of failing', asyn
 		assert.match(item.json.note, /Chat lookup failed/);
 		assert.ok(!item.json.note.includes(PASSWORD));
 	}
+});
+
+// --------------------------------------------------------------------------
+// Message: Search method (Spotlight / Database / Auto fallback)
+// --------------------------------------------------------------------------
+const NOT_NULL = { statement: 'message.text IS NOT NULL', args: {} };
+const SENDER = { statement: 'handle.id = :address', args: { address: '+15550001111' } };
+const like = (term) => ({ statement: LIKE_STATEMENT, args: { query: term } });
+const searchParams = (extra = {}) => ({
+	query: 'the',
+	limit: 3,
+	simplify: true,
+	filters: { fromAddress: '+15550001111' },
+	...extra,
+});
+
+test('textClauses: spotlight is one rerouted clause; database adds a 2nd message.text clause', () => {
+	assert.deepEqual(H.textClauses('', 'database'), []);
+	assert.deepEqual(H.textClauses('', 'spotlight'), []);
+	assert.deepEqual(H.textClauses('50%_x', 'spotlight'), [like('%50\\%\\_x%')]);
+	const db = H.textClauses("50%_x' OR 1=1 --", 'database');
+	assert.deepEqual(db, [like("%50\\%\\_x' OR 1=1 --%"), NOT_NULL]);
+	// The term never reaches a statement, only `args`.
+	for (const clause of db) assert.ok(!clause.statement.includes('OR 1=1'));
+	// Bind name stays the 3rd token; the server would not reroute this shape.
+	assert.equal(db[0].statement.split(' ')[2], ':query');
+	assert.equal(isSpotlightShaped({ where: db }), false);
+	assert.equal(isSpotlightShaped({ where: H.textClauses('x', 'spotlight') }), true);
+	// The shared constant is not handed out (and mutated) by reference.
+	db[1].args.leak = 1;
+	assert.deepEqual(H.TEXT_NOT_NULL_CLAUSE.args, {});
+});
+
+test('message.search auto: tries Spotlight with the 10 s timeout; success means one query', async () => {
+	const { out, calls } = await runWithCalls(message, 'search', searchParams());
+	const queries = calls.filter((c) => !c.body.with.includes('chat'));
+	assert.equal(queries.length, 1);
+	assert.equal(queries[0].timeout, message.SPOTLIGHT_AUTO_TIMEOUT_MS);
+	assert.equal(message.SPOTLIGHT_AUTO_TIMEOUT_MS, 10_000);
+	assert.deepEqual(queries[0].body.where, [like('%the%'), SENDER]);
+	assert.equal(out.length, 3);
+	assert.equal('note' in out[0].json, false);
+});
+
+test('message.search auto: a Spotlight 500 falls back to the database query with a note', async () => {
+	bb.spotlightStatus = 500;
+	const { out, calls } = await runWithCalls(message, 'search', searchParams());
+	const queries = bb.requests.filter((r) => !r.body.with.includes('chat'));
+	assert.equal(queries.length, 2);
+	assert.deepEqual(queries[0].body.where, [like('%the%'), SENDER]);
+	assert.deepEqual(queries[1].body, {
+		limit: 3,
+		offset: 0,
+		sort: 'DESC',
+		with: ['attachment'],
+		where: [like('%the%'), NOT_NULL, SENDER],
+	});
+	const queryCalls = calls.filter((c) => !c.body.with.includes('chat'));
+	assert.deepEqual(
+		queryCalls.map((c) => c.timeout),
+		[message.SPOTLIGHT_AUTO_TIMEOUT_MS, G.DEFAULT_REQUEST_TIMEOUT_MS],
+	);
+	assert.equal(out.length, 3);
+	for (const item of out) {
+		assert.match(
+			item.json.note,
+			/^Spotlight search failed \(Could not search BlueBubbles messages \(HTTP 500\)\)/,
+		);
+		assert.match(item.json.note, /database search/);
+		assert.ok(!item.json.note.includes(PASSWORD));
+		assert.ok(Array.isArray(item.json.chats));
+	}
+});
+
+test('message.search auto: a Spotlight timeout falls back to the database query', async () => {
+	bb.spotlightTimesOut = true;
+	const out = await run(message, 'search', searchParams({ filters: {} }));
+	const queries = bb.requests.filter((r) => !r.body.with.includes('chat'));
+	assert.equal(queries.length, 2);
+	assert.equal(queries[0].timedOut, true);
+	assert.deepEqual(queries[1].body.where, [like('%the%'), NOT_NULL]);
+	assert.equal(out.length, 3);
+	assert.match(
+		out[0].json.note,
+		/^Spotlight search failed \(Could not search BlueBubbles messages \(request timed out\)\)/,
+	);
+});
+
+test('message.search auto: after one Spotlight failure, later items skip straight to the database', async () => {
+	bb.spotlightTimesOut = true;
+	const cache = G.createExecutionCache();
+	const first = await message.execute.call(makeContext(searchParams()), 0, 'search', cache);
+	assert.match(first[0].json.note, /set Search Method to Database/);
+	assert.equal(cache.spotlightFailed, true);
+
+	bb.requests = [];
+	const ctx = makeContext(searchParams());
+	const second = await message.execute.call(ctx, 1, 'search', cache);
+	const queries = bb.requests.filter((r) => !r.body.with.includes('chat'));
+	assert.equal(queries.length, 1);
+	assert.deepEqual(queries[0].body.where, [like('%the%'), NOT_NULL, SENDER]);
+	assert.equal(ctx.calls[0].timeout, G.DEFAULT_REQUEST_TIMEOUT_MS);
+	assert.match(second[0].json.note, /skipped after an earlier item/);
+
+	// Explicit Spotlight is still honoured with the same cache.
+	bb.requests = [];
+	await rejects(
+		message.execute.call(
+			makeContext(searchParams({ searchMethod: 'spotlight' })),
+			2,
+			'search',
+			cache,
+		),
+	);
+	assert.equal(bb.requests[0].timedOut, true);
+});
+
+test('message.search auto: a chat-lookup failure note is appended to the fallback note', async () => {
+	bb.spotlightStatus = 500;
+	bb.lookupFails = true;
+	const out = await run(message, 'search', searchParams());
+	assert.match(out[0].json.note, /^Spotlight search failed .* Chat lookup failed/);
+});
+
+test('message.search auto: a 4xx from the search is not retried', async () => {
+	bb.spotlightStatus = 400;
+	const error = await rejects(run(message, 'search', searchParams()));
+	assert.ok(error instanceof NodeApiError);
+	assert.equal(error.httpCode, '400');
+	assert.equal(bb.requests.length, 1);
+});
+
+test('message.search auto: no query means no Spotlight, no fallback, default timeout', async () => {
+	bb.spotlightStatus = 500;
+	const { calls } = await runWithCalls(message, 'search', searchParams({ query: '' }));
+	const queries = calls.filter((c) => !c.body.with.includes('chat'));
+	assert.equal(queries.length, 1);
+	assert.equal(queries[0].timeout, G.DEFAULT_REQUEST_TIMEOUT_MS);
+	assert.deepEqual(queries[0].body.where, [SENDER]);
+});
+
+test('message.search database: one non-rerouted query, never Spotlight', async () => {
+	bb.spotlightStatus = 500;
+	const { out, calls } = await runWithCalls(
+		message,
+		'search',
+		searchParams({ searchMethod: 'database' }),
+	);
+	const queries = calls.filter((c) => !c.body.with.includes('chat'));
+	assert.equal(queries.length, 1);
+	assert.equal(queries[0].timeout, G.DEFAULT_REQUEST_TIMEOUT_MS);
+	assert.deepEqual(queries[0].body.where, [like('%the%'), NOT_NULL, SENDER]);
+	assert.equal(out.length, 3);
+	assert.equal('note' in out[0].json, false);
+});
+
+test('message.search spotlight: no fallback; the server error is surfaced', async () => {
+	bb.spotlightStatus = 500;
+	const { out } = await runWithCalls(
+		message,
+		'search',
+		searchParams({ searchMethod: 'spotlight', query: '' }),
+	);
+	assert.equal(out.length, 3);
+
+	bb.reset();
+	bb.spotlightStatus = 500;
+	const error = await rejects(run(message, 'search', searchParams({ searchMethod: 'spotlight' })));
+	assert.ok(error instanceof NodeApiError);
+	assert.equal(error.httpCode, '500');
+	assert.match(error.description, /Transaction timeout/);
+	assert.ok(!errorText(error).includes(PASSWORD));
+	assert.equal(bb.requests.length, 1);
+	assert.deepEqual(bb.requests[0].body.where, [like('%the%'), SENDER]);
+});
+
+test('message.search: an unknown search method is a NodeOperationError', async () => {
+	const error = await rejects(run(message, 'search', searchParams({ searchMethod: 'grep' })));
+	assert.ok(error instanceof NodeOperationError);
+	assert.match(error.message, /Unknown search method "grep"/);
+	assert.equal(bb.requests.length, 0);
 });
 
 // --------------------------------------------------------------------------

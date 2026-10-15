@@ -320,7 +320,36 @@ export const messageFields: INodeProperties[] = [
 		default: '',
 		placeholder: 'e.g. dinner',
 		description:
-			'Text to look for in message bodies (case-insensitive substring). Leave empty to match every message. Messages whose text is stored only in rich-text form may not be found.',
+			'Text to look for in message bodies (case-insensitive substring). Leave empty to match every message. See Search Method for how the text is matched.',
+		displayOptions: show(['search']),
+	},
+	{
+		displayName: 'Search Method',
+		name: 'searchMethod',
+		type: 'options',
+		default: 'auto',
+		description:
+			'How Search Text is matched. Spotlight finds every message but needs the Private API helper on macOS 13+ and Spotlight indexing enabled on the Mac; otherwise it hangs until the server times out (about 2 minutes). Database is a plain SQL search that always answers quickly but misses sent messages whose text is stored only in rich-text form (attributedBody) on macOS 13+. If Spotlight indexing is disabled on the Mac, choose Database. Ignored when Search Text is empty.',
+		options: [
+			{
+				name: 'Auto',
+				value: 'auto',
+				description:
+					'Try Spotlight for up to 10 seconds, then fall back to the database search on a timeout or server error (the results then carry a note, and later items of the same run skip Spotlight)',
+			},
+			{
+				name: 'Database',
+				value: 'database',
+				description:
+					'Plain SQL text search; fast, but misses sent messages stored only in rich-text form on macOS 13+. Use this when Spotlight indexing is disabled on the Mac.',
+			},
+			{
+				name: 'Spotlight',
+				value: 'spotlight',
+				description:
+					'Let the server search through Spotlight (Private API on macOS 13+); fails after about 2 minutes if Spotlight indexing is disabled or the helper does not answer',
+			},
+		],
 		displayOptions: show(['search']),
 	},
 	...returnAllLimit(show(['getMany', 'search'])),

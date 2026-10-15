@@ -30,6 +30,19 @@ export const CHAT_404_HINT = 'Chat does not exist; check the chat GUID';
 export const PRIVATE_API_HINT =
 	'Enable Private API in BlueBubbles Server (SIP off, helper connected)';
 
+/**
+ * Default request timeout. BlueBubbles Server gives up on Private API helper
+ * transactions after 120 s ("Transaction timeout"), so waiting slightly longer
+ * lets the server's own error come through instead of a client-side timeout.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 150_000;
+
+/**
+ * Default timeout for attachment downloads and multipart uploads, which move
+ * whole files and can legitimately take much longer than a JSON call.
+ */
+export const ATTACHMENT_REQUEST_TIMEOUT_MS = 600_000;
+
 /** Options for {@link blueBubblesApiRequest}. */
 export interface BlueBubblesRequestOptions {
 	method: IHttpRequestMethods;
@@ -44,7 +57,11 @@ export interface BlueBubblesRequestOptions {
 	 * e.g. "Could not list BlueBubbles webhooks".
 	 */
 	operation: string;
-	/** Request timeout in milliseconds (passed to the n8n HTTP helper). */
+	/**
+	 * Request timeout in milliseconds (passed to the n8n HTTP helper). Defaults to
+	 * {@link DEFAULT_REQUEST_TIMEOUT_MS}, or {@link ATTACHMENT_REQUEST_TIMEOUT_MS}
+	 * for binary downloads and multipart uploads.
+	 */
 	timeout?: number;
 	/** Operation-specific hints that replace the default hint for a status code. */
 	hints?: BlueBubblesErrorHints;
@@ -89,6 +106,11 @@ export type SendMethodOverride = 'auto' | SendMethod;
 export interface BlueBubblesExecutionCache {
 	/** In-flight or settled `GET /server/info` (its `data`). */
 	serverInfo?: Promise<IDataObject>;
+	/**
+	 * Set once a Message > Search in "Auto" mode saw the Spotlight path time out
+	 * or fail; later items of the same execution go straight to the database.
+	 */
+	spotlightFailed?: boolean;
 }
 
 /** Details extracted from whatever the n8n HTTP helper threw. */
@@ -103,19 +125,25 @@ export interface RequestFailure {
 	rawMessage?: string;
 }
 
+/** Short reason used in the error message when a request hits its timeout. */
+const REQUEST_TIMED_OUT = 'request timed out';
+
+/** Short reason used in the error message when a connection attempt times out. */
+const CONNECTION_TIMED_OUT = 'connection timed out';
+
 /** Network error codes that mean "n8n could not reach the server". */
 const CONNECTION_ERROR_CODES: Record<string, string> = {
 	ECONNREFUSED: 'connection refused',
 	ENOTFOUND: 'host not found',
 	EAI_AGAIN: 'DNS lookup failed',
-	ETIMEDOUT: 'connection timed out',
-	ECONNABORTED: 'request timed out',
-	ESOCKETTIMEDOUT: 'request timed out',
+	ETIMEDOUT: CONNECTION_TIMED_OUT,
+	ECONNABORTED: REQUEST_TIMED_OUT,
+	ESOCKETTIMEDOUT: REQUEST_TIMED_OUT,
 	EHOSTUNREACH: 'host unreachable',
 	ENETUNREACH: 'network unreachable',
 	ECONNRESET: 'connection reset',
 	EPIPE: 'connection closed',
-	UND_ERR_CONNECT_TIMEOUT: 'connection timed out',
+	UND_ERR_CONNECT_TIMEOUT: CONNECTION_TIMED_OUT,
 };
 
 /** Query-string keys the BlueBubbles server accepts as the server password. */
@@ -276,9 +304,21 @@ export function inspectRequestError(error: unknown): RequestFailure {
 function failureReason(failure: RequestFailure): string {
 	if (failure.status !== undefined) return `HTTP ${failure.status}`;
 	if (failure.code) return CONNECTION_ERROR_CODES[failure.code] ?? 'network error';
-	if (failure.rawMessage && /timeout|timed out/i.test(failure.rawMessage))
-		return 'request timed out';
+	if (failure.rawMessage && /timeout|timed out/i.test(failure.rawMessage)) return REQUEST_TIMED_OUT;
 	return 'request failed';
+}
+
+/**
+ * Whether an error thrown by the request helpers of this module (a sanitized
+ * `NodeApiError` from {@link buildApiError}) is a client-side timeout, i.e. the
+ * server did not answer in time.
+ */
+export function isTimeoutError(error: unknown): boolean {
+	if (!(error instanceof NodeApiError) || error.httpCode) return false;
+	return (
+		error.message.endsWith(`(${REQUEST_TIMED_OUT})`) ||
+		error.message.endsWith(`(${CONNECTION_TIMED_OUT})`)
+	);
 }
 
 /** An actionable hint for the most common failures. */
@@ -403,7 +443,7 @@ async function sendAuthenticated(
 		method,
 		url: `${target.serverUrl}/api/v1${endpoint}`,
 	};
-	if (timeout !== undefined) options.timeout = timeout;
+	options.timeout = timeout ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
 	const logMeta = {
 		method,
@@ -519,7 +559,7 @@ export async function blueBubblesBinaryRequest(
 		this,
 		target,
 		{ qs: options.qs ?? {}, encoding: 'arraybuffer', returnFullResponse: true },
-		options,
+		{ ...options, timeout: options.timeout ?? ATTACHMENT_REQUEST_TIMEOUT_MS },
 	);
 
 	const full = isRecord(response) ? response : {};
@@ -566,7 +606,7 @@ export async function blueBubblesFormRequest<T = unknown>(
 		this,
 		target,
 		{ qs: options.qs ?? {}, body: form as unknown as IHttpRequestOptions['body'] },
-		options,
+		{ ...options, timeout: options.timeout ?? ATTACHMENT_REQUEST_TIMEOUT_MS },
 	);
 	return unwrapEnvelope(this, target, response, options) as T;
 }

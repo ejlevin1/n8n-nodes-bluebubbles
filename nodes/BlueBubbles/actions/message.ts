@@ -1,11 +1,12 @@
 import type { IDataObject, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 
 import type { BlueBubblesExecutionCache, SendMethodOverride } from '../GenericFunctions';
 import {
 	addressToChatGuid,
 	blueBubblesApiCall,
 	CHAT_404_HINT,
+	isTimeoutError,
 	normalizeChatGuid,
 	resolveSendMethod,
 	simplifyMessage,
@@ -15,19 +16,36 @@ import {
 	asObject,
 	collectPages,
 	encodeGuid,
-	likeClause,
 	matchesSender,
 	MESSAGE_404_HINT,
 	requireString,
 	resolveMessageChats,
 	senderClauses,
+	textClauses,
 	toTimestampMs,
+	type SearchMethod,
 	type WhereClause,
 } from './messageHelpers';
 import type { ResourceExecutor } from './shared';
 import { getChatGuid, toItems } from './shared';
 
 const REACTIONS = new Set(['love', 'like', 'dislike', 'laugh', 'emphasize', 'question']);
+
+const SEARCH_METHODS: readonly SearchMethod[] = ['auto', 'spotlight', 'database'];
+
+/**
+ * How long Search Method "Auto" waits for the Spotlight search before it falls
+ * back to the database search. A healthy helper answers in about a second; with
+ * Spotlight indexing disabled on the Mac the helper never answers and the server
+ * only fails after its 120 s transaction timeout. The server exposes no way to
+ * tell that Spotlight is off, so this bound is the only protection in Auto mode.
+ */
+export const SPOTLIGHT_AUTO_TIMEOUT_MS = 10_000;
+
+/** Note added to Auto results that came from the database fallback. */
+function fallbackNote(reason: string): string {
+	return `Spotlight search failed (${reason}); these results come from the database search, which misses sent messages whose text is stored only in rich-text form (macOS 13+). If Spotlight indexing is disabled on the Mac, set Search Method to Database to skip the Spotlight attempt.`;
+}
 
 interface SendOptions extends IDataObject {
 	method?: SendMethodOverride;
@@ -188,8 +206,30 @@ function getOptionalChatGuid(ctx: IExecuteFunctions, i: number): string | undefi
 	return getChatGuid(ctx, i);
 }
 
-async function search(this: IExecuteFunctions, i: number): Promise<INodeExecutionData[]> {
+function getSearchMethod(ctx: IExecuteFunctions, i: number): SearchMethod {
+	const value = String(ctx.getNodeParameter('searchMethod', i, 'auto') ?? 'auto');
+	if ((SEARCH_METHODS as readonly string[]).includes(value)) return value as SearchMethod;
+	throw new NodeOperationError(ctx.getNode(), `Unknown search method "${value}"`, {
+		itemIndex: i,
+		description: `Use one of: ${SEARCH_METHODS.join(', ')}.`,
+	});
+}
+
+/** Whether a failed Spotlight search should be retried against the database. */
+function isSpotlightFailure(error: unknown): error is NodeApiError {
+	if (!(error instanceof NodeApiError)) return false;
+	if (isTimeoutError(error)) return true;
+	const status = Number(error.httpCode);
+	return Number.isInteger(status) && status >= 500;
+}
+
+async function search(
+	this: IExecuteFunctions,
+	i: number,
+	cache: BlueBubblesExecutionCache,
+): Promise<INodeExecutionData[]> {
 	const query = String(this.getNodeParameter('query', i, '') ?? '');
+	const searchMethod = getSearchMethod(this, i);
 	const chatGuid = getOptionalChatGuid(this, i);
 	const returnAll = this.getNodeParameter('returnAll', i, false) as boolean;
 	const limit = returnAll ? 0 : (this.getNodeParameter('limit', i, 50) as number);
@@ -204,27 +244,53 @@ async function search(this: IExecuteFunctions, i: number): Promise<INodeExecutio
 	if (after !== undefined) base.after = after;
 	if (before !== undefined) base.before = before;
 
-	const where: WhereClause[] = [];
-	if (query) where.push(likeClause(query));
-	where.push(
-		...senderClauses(typeof filters.fromAddress === 'string' ? filters.fromAddress : undefined),
+	const senders = senderClauses(
+		typeof filters.fromAddress === 'string' ? filters.fromAddress : undefined,
 	);
-	if (where.length > 0) base.where = where;
 
-	const rows = await collectPages(
-		async (offset, pageSize) =>
-			await blueBubblesApiCall.call(this, {
-				method: 'POST',
-				endpoint: '/message/query',
-				body: { limit: pageSize, offset, ...base },
-				operation: 'Could not search BlueBubbles messages',
-			}),
-		returnAll,
-		limit,
-	);
+	const fetchRows = async (text: WhereClause[], timeout?: number): Promise<IDataObject[]> => {
+		const where = [...text, ...senders];
+		const body: IDataObject = where.length > 0 ? { ...base, where } : base;
+		return await collectPages(
+			async (offset, pageSize) =>
+				await blueBubblesApiCall.call(this, {
+					method: 'POST',
+					endpoint: '/message/query',
+					body: { limit: pageSize, offset, ...body },
+					operation: 'Could not search BlueBubbles messages',
+					timeout,
+				}),
+			returnAll,
+			limit,
+		);
+	};
+
+	const notes: string[] = [];
+	let rows: IDataObject[];
+	if (query && searchMethod === 'auto' && cache.spotlightFailed) {
+		// An earlier item of this execution already saw Spotlight fail.
+		rows = await fetchRows(textClauses(query, 'database'));
+		notes.push(fallbackNote('skipped after an earlier item of this execution failed'));
+	} else if (!query || searchMethod !== 'auto') {
+		rows = await fetchRows(
+			textClauses(query, searchMethod === 'auto' ? 'spotlight' : searchMethod),
+		);
+	} else {
+		rows = await fetchRows(textClauses(query, 'spotlight'), SPOTLIGHT_AUTO_TIMEOUT_MS).catch(
+			async (error: unknown) => {
+				if (!isSpotlightFailure(error)) throw error;
+				const reason = error.message;
+				this.logger.warn('BlueBubbles Spotlight search failed; using the database search', {
+					error: reason,
+				});
+				cache.spotlightFailed = true;
+				notes.push(fallbackNote(reason));
+				return await fetchRows(textClauses(query, 'database'));
+			},
+		);
+	}
 
 	// Second pass: attach chats. A failure here must not fail the item.
-	let note: string | undefined;
 	try {
 		const chats = await resolveMessageChats(
 			this,
@@ -233,11 +299,16 @@ async function search(this: IExecuteFunctions, i: number): Promise<INodeExecutio
 		for (const row of rows) row.chats = chats.get(String(row.guid ?? '')) ?? [];
 	} catch (error) {
 		for (const row of rows) row.chats = Array.isArray(row.chats) ? row.chats : [];
-		note = `Chat lookup failed (${(error as Error).message}); the messages are complete but have no chats.`;
+		notes.push(
+			`Chat lookup failed (${(error as Error).message}); the messages are complete but have no chats.`,
+		);
 	}
 
 	const output = maybeSimplify(rows, simplify);
-	if (note) for (const row of output) row.note = note;
+	if (notes.length > 0) {
+		const note = notes.join(' ');
+		for (const row of output) row.note = note;
+	}
 	return toItems(output, i);
 }
 
@@ -311,7 +382,7 @@ export const execute: ResourceExecutor = async function (this, itemIndex, operat
 		case 'getMany':
 			return await getMany.call(this, itemIndex);
 		case 'search':
-			return await search.call(this, itemIndex);
+			return await search.call(this, itemIndex, cache);
 		case 'react':
 			return await react.call(this, itemIndex);
 		case 'edit':
