@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-bluebubbles",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "n8n community nodes for BlueBubbles (self-hosted iMessage server): credential + auto-subscribing webhook trigger",
 	"license": "MIT",
 	"homepage": "https://github.com/ejlevin1/n8n-nodes-bluebubbles",
