@@ -27,6 +27,7 @@
 		"dev": "n8n-node dev",
 		"lint": "n8n-node lint",
 		"lint:fix": "n8n-node lint --fix",
+		"test": "n8n-node build && node --test \"test/**/*.test.cjs\"",
 		"hooks:install": "git config core.hooksPath .githooks",
 		"dependencies": "git config core.hooksPath .githooks || echo Skipping git hooks install: not a git checkout",
 		"prepublishOnly": "node -e \"console.error('Refusing to npm publish from the working tree. Releases are published by CI (release-please) from the packed tarball; for a manual publish run: npm pack, then npm publish ./n8n-nodes-bluebubbles-X.Y.Z.tgz --access public');process.exit(1)\""

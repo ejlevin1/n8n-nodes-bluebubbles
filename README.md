@@ -41,9 +41,9 @@ The trigger manages its BlueBubbles webhook for you; there is nothing to configu
 
 On workflow activation:
 
-1. Lists existing webhooks with `GET /api/v1/webhook?url=<n8n webhook URL>`.
+1. Lists all webhooks with `GET /api/v1/webhook` and matches the n8n webhook URL exactly. (The server's `?url=` filter is not used: on BlueBubbles Server 1.9.9 it returns HTTP 500 when no webhook has that URL.) If listing fails, activation continues and step 4 reports any problem.
 2. If a webhook with the identical URL and events exists, it is reused.
-3. If a webhook with the same URL but different events exists, it is replaced.
+3. If a webhook with the same URL but different events exists, it is replaced. BlueBubbles keeps one webhook per URL and returns the existing one unchanged on `POST`, so the trigger also checks the events the server returns and replaces the webhook if they differ.
 4. Otherwise, a new webhook is created with `POST /api/v1/webhook` and body `{ "url": "...", "events": [...] }`.
 5. The webhook ID is stored in the workflow static data.
 
@@ -55,7 +55,9 @@ On workflow deactivation, the webhook is removed with `DELETE /api/v1/webhook/:i
 
 Select one or more events (`*` subscribes to all):
 
-`*`, `new-message`, `updated-message`, `message-send-error`, `group-name-change`, `group-icon-changed`, `group-icon-removed`, `participant-added`, `participant-removed`, `participant-left`, `chat-read-status-changed`, `typing-indicator`, `scheduled-message-error`, `server-update`, `new-server`, `new-findmy-location`, `incoming-facetime`, `ft-call-status-changed`, `imessage-alias-removed`, `hello-world`
+`*`, `new-message`, `updated-message`, `message-send-error`, `group-name-change`, `group-icon-changed`, `group-icon-removed`, `participant-added`, `participant-removed`, `participant-left`, `chat-read-status-changed`, `typing-indicator`, `scheduled-message-error`, `server-update`, `new-server`, `new-findmy-location`, `incoming-facetime`, `ft-call-status-changed`, `imessage-alias-removed`, `hello-world`, `settings-backup-created`, `settings-backup-updated`, `settings-backup-deleted`, `theme-backup-created`, `theme-backup-updated`, `theme-backup-deleted`
+
+This is the server's own whitelist (`webhookEventOptions` in BlueBubbles Server); any other value is rejected with HTTP 400.
 
 ### Output
 
@@ -70,7 +72,10 @@ To branch on event type, add an IF or Switch node on `{{ $json.type }}`.
 ### Notes
 
 - BlueBubbles webhooks are not signed and are not retried. If n8n is unreachable when an event fires, that event is lost.
-- BlueBubbles sends a `hello-world` event when a webhook is created. Filter it out downstream if you subscribed to `*`.
+- BlueBubbles does not send a test event when a webhook is created. `hello-world` is only emitted when the BlueBubbles HTTP server starts; filter it out downstream if you subscribed to `*`.
+- The webhook API (`/api/v1/webhook`) requires BlueBubbles Server 1.9.9 or newer.
+- `imessage-alias-removed` is the name the server accepts for subscriptions, but BlueBubbles Server (1.9.9 / master) emits that event as `imessage-aliases-removed`, so only a `*` subscription receives it.
+- If activation fails ("Failed triggers"), open the trigger node: the error names the request, the server URL, the HTTP status or network error, the BlueBubbles error message and a hint. The password is never included.
 
 ## Networking
 
@@ -155,6 +160,7 @@ npm install           # also points git at the repo's hooks (see below)
 npm run dev           # starts n8n with hot reload of this node at http://localhost:5678
 npm run lint
 npm run build
+npm test              # builds, then runs test/*.test.cjs against a mock BlueBubbles server
 ```
 
 ## Contributing
